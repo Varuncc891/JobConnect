@@ -1,7 +1,7 @@
 # JobConnect — AI-Powered Job Portal
 
 > A production-ready recruitment SaaS platform built with TypeScript, Redis, Docker, and AI resume parsing.  
-> 300ms API responses · AI resume parsing · 📧 Email notifications · 🐳 Fully containerized
+> 🤖 AI resume parsing · ⚡ Redis caching · 📧 Email notifications · 🐳 Dockerized
 
 🔗 **Live Demo:** https://job-connect-2.vercel.app  
 📖 **API Docs:** https://jc-backend-dxuw.onrender.com/api-docs
@@ -16,15 +16,15 @@
 
 JobConnect is a full-stack job portal where employers post jobs and job seekers apply. Upload your resume as a PDF and the platform automatically extracts your name, email, phone, and skills using AI, filling in your application form in under 3 seconds. When an employer accepts or rejects an application, the job seeker gets an automated email instantly.
 
-Built to demonstrate production-grade engineering : strict TypeScript, Redis caching, Docker, CI/CD, and OWASP-aligned security.
+Built to demonstrate production-grade engineering: strict TypeScript, Redis caching, Docker, CI/CD, and OWASP-aligned security.
 
 ## Highlights
 
-- ⚡ Reduced API response time from **5s → 120ms** using Redis caching  
-- 🤖 AI-powered resume parsing with automatic form filling in **< 3 seconds**  
-- 🔐 Secure authentication with JWT (httpOnly cookies) and RBAC  
-- 🐳 Fully containerized using Docker with Nginx reverse proxy  
-- 🚀 Production deployment on Render + Vercel with CI/CD pipeline  
+- ⚡ Redis cache-aside caching on job listings (5-minute TTL, invalidated on writes, graceful fallback to MongoDB)
+- 🤖 AI-powered resume parsing with automatic form filling in **< 3 seconds**
+- 🔐 Secure authentication with JWT (httpOnly cookies) and RBAC
+- 🐳 Dockerized stack with multi-stage builds and an Nginx reverse proxy for local Docker runs
+- 🚀 Production deployment on Render + Vercel with a GitHub Actions CI/CD pipeline
 
 ---
 
@@ -32,9 +32,9 @@ Built to demonstrate production-grade engineering : strict TypeScript, Redis cac
 
 - **TypeScript** — Full backend + frontend migration, strict mode, typed models and components.
 
-- **Redis Caching** — Cache-aside pattern, URL-based keys, 5min TTL. Response time dropped from 5s to 120ms.
+- **Redis Caching** — Cache-aside pattern on `GET /job/getall`, URL-based keys, 5-minute TTL, invalidation on job create/update/delete, and automatic fallback to MongoDB if Redis is unavailable. `X-Cache: HIT/MISS` response headers make cache behavior easy to monitor.
 
-- **AI Resume Parser** — Upload PDF → Apilayer API extracts name, email, phone, skills → fallback to pdf-parse if API fails.
+- **AI Resume Parser** — Upload PDF → Apilayer API extracts name, email, phone, skills → fallback to pdf-parse if the API fails.
 
 ![Demo](./assets/resumeparser.png)
 
@@ -44,13 +44,15 @@ Built to demonstrate production-grade engineering : strict TypeScript, Redis cac
 
 - **Zod Validation** — Schema validation on all POST/PUT endpoints before hitting the controller.
 
-- **Email Notifications** — Automated accept/reject emails via Nodemailer when employer updates application status.
+- **Rate Limiting** — `express-rate-limit` on all `/api/` routes, 100 requests per 15 minutes per IP.
 
-- **CI/CD** — GitHub Actions runs Jest tests on every PR, deploys on merge to main.
+- **Email Notifications** — Automated accept/reject emails via Nodemailer when employer updates application status. Email failures never fail the HTTP request.
+
+- **CI/CD** — GitHub Actions runs TypeScript compilation (`tsc --noEmit`) and Jest tests on every PR, and deploys on merge to main.
 
 - **Swagger / OpenAPI** — Auto-generated interactive API docs at `/api-docs`.
 
-- **Pagination + Filtering** — DB-level filtering by category, city, salary. Active filters sync to URL.
+- **Pagination + Filtering** — DB-level filtering by category, city, salary, with sorting. Active filters sync to the URL so filtered views are shareable.
 
 - **Deployment** — Render (backend) + Vercel (frontend), cross-domain cookie auth configured.
 
@@ -58,27 +60,46 @@ Built to demonstrate production-grade engineering : strict TypeScript, Redis cac
 
 ## Tech Stack
 
-**Backend:** Node.js · Express · TypeScript · MongoDB · Redis  
-**Frontend:** React · TypeScript · Vite · Tailwind CSS  
+**Backend:** Node.js · Express · TypeScript · MongoDB (Mongoose) · Redis (ioredis) · Zod · JWT  
+**Frontend:** React · TypeScript · Vite · Tailwind CSS · Axios  
 **Services:** Apilayer (AI parser) · Nodemailer · Cloudinary  
-**DevOps:** Docker · Nginx · GitHub Actions · Render · Vercel
+**DevOps:** Docker · Docker Compose · Nginx · GitHub Actions · Render · Vercel
 
 ---
 
 ## Architecture
 
+### Production (Vercel + Render)
+
+The frontend talks directly to the backend API (cross-domain, cookie auth). There is no Nginx in the production path.
+
 ```
-┌──────────────┐      ┌────────────────┐      ┌────────────────┐
-│  React +     │────▶ │  Nginx         │────▶ │  Express +     │
-│  TypeScript  │      │  Reverse Proxy │      │  TypeScript    │
-│  (Vercel)    │      │  /api/* → 4000 │      │  (Render)      │
-└──────────────┘      └────────────────┘      └───────┬────────┘
-                                                       │
-                                        ┌──────────────┼──────────────┐
-                                        ▼              ▼              ▼
-                                   ┌─────────┐   ┌─────────┐   ┌───────────┐
-                                   │ MongoDB │   │  Redis  │   │Cloudinary │
-                                   └─────────┘   └─────────┘   └───────────┘
+┌──────────────┐        ┌────────────────┐
+│  React +     │──────▶ │  Express +     │
+│  TypeScript  │  HTTPS │  TypeScript    │
+│  (Vercel)    │        │  (Render)      │
+└──────────────┘        └───────┬────────┘
+                                │
+                 ┌──────────────┼──────────────┐
+                 ▼              ▼              ▼
+            ┌─────────┐   ┌─────────┐   ┌───────────┐
+            │ MongoDB │   │  Redis  │   │Cloudinary │
+            │ (Atlas) │   │(managed)│   │           │
+            └─────────┘   └─────────┘   └───────────┘
+```
+
+### Local Docker (docker-compose)
+
+Nginx serves the frontend and reverse-proxies `/api/*` to the backend, so the browser only talks to one origin.
+
+```
+┌─────────┐      ┌──────────────────┐      ┌────────────────┐      ┌─────────┐
+│ Browser │────▶ │  Frontend        │────▶ │  Backend       │────▶ │  Redis  │
+│         │      │  Nginx  :3000    │ /api │  Express :4000 │      │ (7)     │
+└─────────┘      └──────────────────┘      └───────┬────────┘      └─────────┘
+                                                   │
+                                                   ▼
+                                     MongoDB (MONGO_URI) · Cloudinary
 ```
 
 ---
@@ -88,12 +109,14 @@ Built to demonstrate production-grade engineering : strict TypeScript, Redis cac
 ### Docker (Recommended)
 
 ```bash
-git clone https://github.com/Varuncc891/JobConnect_2
-cd JobConnect_2
+git clone https://github.com/Varuncc891/JobConnect
+cd JobConnect
 cp backend/.env.example backend/.env
 # fill in your values
 docker-compose up
 ```
+
+Compose starts Redis, the backend, and the frontend. MongoDB is not included in the compose file, so point `MONGO_URI` at MongoDB Atlas or a local instance.
 
 ### Manual
 
@@ -173,9 +196,7 @@ npm test               # run all tests
 npm test -- --coverage # with coverage
 ```
 
-20+ tests covering Zod schemas, utility functions, and middleware.
-
-**picture 3: screenshot of GitHub Actions showing a passing workflow run**
+20+ tests covering Zod schemas, utility functions, and middleware. CI runs them on every pull request.
 
 ---
 
@@ -199,18 +220,29 @@ npm test -- --coverage # with coverage
 | A02 Cryptographic Failures | bcrypt, HTTPS in production |
 | A03 Injection | Zod validation, Mongoose parameterized queries |
 | A05 Security Misconfiguration | CORS whitelist, secrets in env vars |
-| A07 Auth Failures | httpOnly cookies, JWT expiry, bcrypt |
+| A07 Auth Failures | httpOnly cookies, JWT expiry (7d), bcrypt |
+
+---
+
+## Known Limitations
+
+- Cache invalidation uses `redis.keys('jobs:*')`, which blocks the event loop at scale. A `SCAN`-based or versioned-prefix approach is the right fix.
+- A few frontend components still use an absolute `localhost:4000` URL instead of `VITE_API_URL`, so the Docker setup is not fully same-origin for those paths.
+- The resume parser depends on Apilayer. If the API is down, the `pdf-parse` fallback kicks in, but extraction quality is lower.
+- Single Redis instance with no eviction policy tuning (`allkeys-lru` would be the production choice).
+- Notifications are email-only, not real-time.
+- The rate limit (100 requests per 15 minutes) is a global default, not tuned per endpoint.
 
 ---
 
 ## Project Structure
 
 ```
-JobConnect_2/
+JobConnect/
 ├── backend/src/
 │   ├── config/        # DB, Redis, Swagger
 │   ├── controllers/   # Route handlers
-│   ├── middleware/    # Auth, RBAC, cache, validate
+│   ├── middleware/    # Auth, RBAC, cache, validate, rateLimit
 │   ├── models/        # Mongoose + TypeScript interfaces
 │   ├── routes/        # Express routers + Swagger JSDoc
 │   ├── services/      # AI parser, email
